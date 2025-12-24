@@ -278,6 +278,12 @@ app.whenReady().then(async () => {
     // Initialize SDK Installer path
     sdkInstaller.init(userDataPath);
 
+    // Apply Android environment variables to the current process
+    // This ensures any spawned helpers (like Appium) inherit ANDROID_HOME
+    const androidEnv = sdkInstaller.getEnv();
+    Object.assign(process.env, androidEnv);
+    console.log('[Main] Android Environment variables configured:', androidEnv.ANDROID_HOME);
+
     // CHECK ENVIRONMENT
     const sdkStatus = await sdkInstaller.checkEnvironment();
 
@@ -308,10 +314,35 @@ ipcMain.handle('setup:start', async (event) => {
   try {
     // 1. Prerequisite Check
     send({ step: 'prereq', message: 'Checking System Prerequisites...' });
-    const prereq = await prerequisiteChecker.checkAll();
+    let prereq = await prerequisiteChecker.checkAll();
 
     if (!prereq.success) {
-      throw new Error(prereq.java.message || prereq.virtualization.message);
+      if (!prereq.java.success) {
+        send({ step: 'prereq', message: 'Java not found. Installing OpenJDK 8...' });
+        try {
+          await sdkInstaller.installJava((downloaded, total) => {
+            const percentage = Math.round((downloaded / total) * 100);
+            send({ step: 'prereq', message: `Downloading Java... ${percentage}%`, progress: percentage });
+          });
+
+          // Update PATH for this process so subsequent checks and tools work
+          const javaBin = sdkInstaller.getJavaBinPath();
+          process.env.PATH = `${javaBin}${path.delimiter}${process.env.PATH}`;
+          process.env.JAVA_HOME = path.dirname(javaBin);
+
+          send({ step: 'prereq', message: 'Java installed. Verifying...' });
+          prereq = await prerequisiteChecker.checkAll();
+
+          if (!prereq.success) {
+            throw new Error("Java installation failed verification: " + (prereq.java.message || prereq.virtualization.message));
+          }
+
+        } catch (e) {
+          throw new Error("Failed to auto-install Java: " + e.message);
+        }
+      } else {
+        throw new Error(prereq.java.message || prereq.virtualization.message);
+      }
     }
 
     // 2. Download Tools
